@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
-project(ci_literals LANGUAGES CXX)
+project(ic_literals LANGUAGES CXX)
 
 ################################################## 
 # C++ standard version selection
@@ -42,15 +42,18 @@ endif()
 ##################################################
 # library
 ##################################################
-add_library(ci_literals)
-target_include_directories(ci_literals
-  PUBLIC
+add_library(ic_literals INTERFACE)
+target_include_directories(ic_literals
+  INTERFACE
   $<INSTALL_INTERFACE:include>
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
-set_property(TARGET ci_literals PROPERTY CXX_STANDARD ${CXX_STD})
+set_property(TARGET ic_literals PROPERTY CXX_STANDARD ${CXX_STD})
 if (link_flags)
-    target_link_libraries(ci_literals PUBLIC ${link_flags})
-    target_compile_options(ci_literals PUBLIC ${compile_flags})
+    target_link_libraries(ic_literals PUBLIC ${link_flags})
+    target_compile_options(ic_literals PUBLIC ${compile_flags})
+endif ()
+if (NOT MSVC)
+  target_compile_options(ic_literals INTERFACE -Wno-literal-suffix)
 endif ()
 
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/include
