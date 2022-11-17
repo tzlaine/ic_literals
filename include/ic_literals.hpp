@@ -1,3 +1,6 @@
+#include <boost/hana.hpp>
+
+#include <algorithm>
 #include <cassert>
 #include <stdexcept>
 #include <limits>
@@ -16,60 +19,59 @@ namespace std {
 namespace ic_literals {
   using namespace std;
 
+  // Everything guarded by this macro is exposition only (and not proposed).
 #if !defined(__cpp_lib_constexpr_charconv)
-  using longest_unsigned_type = // exposition only (and not proposed)
+  using longest_unsigned_type =
       conditional_t<
           sizeof(size_t) < sizeof(unsigned long long),
           unsigned long long,
           size_t>;
 
-  constexpr int to_int(char c) // exposition only (and not proposed)
+  template<char C>
+  constexpr auto to_int()
   {
-      int result = 0;
-
-      if (c >= 'A' && c <= 'F') {
-        result = static_cast<int>(c) - static_cast<int>('A') + 10;
-      } else if (c >= 'a' && c <= 'f') {
-        result = static_cast<int>(c) - static_cast<int>('a') + 10;
-      } else if (c >= '0' && c <= '9') {
-        result = static_cast<int>(c) - static_cast<int>('0');
+      if constexpr ('A' <= C && C <= 'F') {
+        return boost::hana::llong_c<C - 'A' + 10>;
+      } else if constexpr ('a' <= C && C <= 'f') {
+        return boost::hana::llong_c<C - 'a' + 10>;
       } else {
-          throw logic_error("");
+        return boost::hana::llong_c<C - '0'>;
       }
-
-      return result;
   }
+
+  struct ci_base_and_offset_result
+  {
+    int base;
+    int offset;
+  };
 #endif
 
-  template<typename TargetType, char ...chars>
+  template<size_t Size, char... Chars>
+  constexpr ci_base_and_offset_result ci_base_and_offset()
+  {
+      constexpr char arr[] = {Chars...};
+      if constexpr (arr[0] == '0' && 2 < Size) {
+        constexpr bool is_hex = arr[1] == 'x' || arr[1] == 'X';
+        constexpr bool is_binary = arr[1] == 'b';
+
+        if constexpr (is_hex)
+          return {16, 2};
+        else if constexpr (is_binary)
+          return {2, 2};
+        else
+          return {8, 1};
+      }
+      return {10, 0};
+  }
+
+  template<typename TargetType, char ...Chars>
   constexpr TargetType parse_ci() // exposition only
   {
-      int base = 10;
-      int offset = 0;
+      constexpr auto size = sizeof...(Chars);
 
-      constexpr char arr[] = {chars...};
-      constexpr auto size = sizeof...(chars);
-
-      if (arr[0] == '0') {
-        if (2 < size) {
-          const bool is_hex = arr[1] == 'x' || arr[1] == 'X';
-          const bool is_binary = arr[1] == 'b';
-  
-          if (is_hex) {
-            base = 16;
-            offset = 2;
-          } else if (is_binary) {
-            base = 2;
-            offset = 2;
-          } else {
-            base = 8;
-            offset = 1;
-          }
-        } else if (size == 2) {
-          base = 8;
-          offset = 1;
-        }
-      }
+      constexpr auto bao = ci_base_and_offset<size, Chars...>();
+      constexpr int base = bao.base;
+      constexpr int offset = bao.offset;
 
 #if defined(__cpp_lib_constexpr_charconv)
       // This is really here just for documentation purposes right now,
@@ -85,176 +87,255 @@ namespace ic_literals {
 #else
       // Approximate implementation to work around the lack of a constexpr
       // from_chars() at the time of writing.
-      longest_unsigned_type number = 0;
-      longest_unsigned_type multiplier = 1;
-      for (size_t i = 0; i < size - offset; ++i) {
-        char c = arr[size - 1 - i];
-        longest_unsigned_type digit_value = to_int(c);
-        // TODO: Check for overflow in the multiplication below
-        longest_unsigned_type digit_value_here = digit_value * multiplier;
-        // TODO: Check for overflow in the addition below
-        number += digit_value_here;
-        // TODO: Check for overflow in the multiplication below
-        multiplier *= base;
-      }
-      if (number < (longest_unsigned_type)std::numeric_limits<TargetType>::min() ||
-          (longest_unsigned_type)std::numeric_limits<TargetType>::max() < number) {
-          // TODO: We should fail here, a la throw logic_error(""), but the
-          // predicate to this if is not a constant epxression.
-      }
-      return number;
+
+      using namespace boost::hana::literals;
+
+      constexpr auto digits_ = boost::hana::make_tuple(to_int<Chars>()...);
+      constexpr auto digits_trimmed =
+          boost::hana::drop_front(digits_, boost::hana::llong_c<offset>);
+
+      // initial is (result, mulitplier)
+      constexpr auto initial = boost::hana::make_tuple(
+          boost::hana::llong_c<0>, boost::hana::llong_c<1>);
+      constexpr auto final = boost::hana::reverse_fold(
+          digits_trimmed, initial, [base](auto state, auto element_) {
+              constexpr auto result = boost::hana::llong_c<state[0_c].value>;
+              constexpr auto multiplier = boost::hana::llong_c<state[1_c].value>;
+              constexpr auto element = boost::hana::llong_c<element_.value>;
+              static_assert(
+                  element * multiplier / multiplier == element,
+                  "Overflow detected");
+              static_assert(
+                  result + element * multiplier - element * multiplier ==
+                      result,
+                  "Overflow detected");
+              static_assert(
+                  multiplier * base / base == multiplier, "Overflow detected");
+              return boost::hana::make_tuple(
+                  boost::hana::llong_c<result + element * multiplier>,
+                  boost::hana::llong_c<multiplier * base>);
+          });
+
+      constexpr auto retval = final[0_c].value;
+      static_assert(
+          retval <= std::numeric_limits<TargetType>::max(),
+          "The number parsed in an integral_constant literal is out of the "
+          "representable range for the integral type being parsed");
+      return retval;
 #endif
   }
 
   // (signed) int
-  template <char ...chars>
+  template <char ...Chars>
   constexpr auto operator"" ic()
   {
-    constexpr auto x = parse_ci<int, chars...>();
+    constexpr auto x = parse_ci<int, Chars...>();
     return integral_constant<remove_const_t<decltype(x)>, x>{};
   }
 
-  // unsigned int
-  template <char ...chars>
+  // unsigned
+  template <char ...Chars>
   constexpr auto operator"" uic()
   {
-    constexpr auto x = parse_ci<unsigned int, chars...>();
+    constexpr auto x = parse_ci<unsigned, Chars...>();
     return integral_constant<remove_const_t<decltype(x)>, x>{};
   }
-  template <char ...chars>
+  template <char ...Chars>
   constexpr auto operator"" Uic()
   {
-    constexpr auto x = parse_ci<unsigned int, chars...>();
+    constexpr auto x = parse_ci<unsigned, Chars...>();
     return integral_constant<remove_const_t<decltype(x)>, x>{};
   }
 
-  // (signed) long int
-  template <char ...chars>
+  // (signed) long
+  template <char ...Chars>
   constexpr auto operator"" lic()
   {
-    auto const x = parse_ci<long, sizeof...(chars)>({chars...});
-    return integral_constant<decltype(x), x>{};
+    constexpr auto x = parse_ci<long, Chars...>();
+    return integral_constant<remove_const_t<decltype(x)>, x>{};
   }
-  template <char ...chars>
+  template <char ...Chars>
   constexpr auto operator"" Lic()
   {
-    auto const x = parse_ci<long, sizeof...(chars)>({chars...});
-    return integral_constant<decltype(x), x>{};
+    constexpr auto x = parse_ci<long, Chars...>();
+    return integral_constant<remove_const_t<decltype(x)>, x>{};
   }
 
-  // unsigned long int
-  template <char ...chars>
+  // unsigned long
+  template <char ...Chars>
   constexpr auto operator"" luic()
   {
-    auto const x = parse_ci<unsigned long, sizeof...(chars)>({chars...});
-    return integral_constant<decltype(x), x>{};
+    constexpr auto x = parse_ci<unsigned long, Chars...>();
+    return integral_constant<remove_const_t<decltype(x)>, x>{};
   }
-  template <char ...chars>
+  template <char ...Chars>
   constexpr auto operator"" ulic()
   {
-    auto const x = parse_ci<unsigned long, sizeof...(chars)>({chars...});
-    return integral_constant<decltype(x), x>{};
+    constexpr auto x = parse_ci<unsigned long, Chars...>();
+    return integral_constant<remove_const_t<decltype(x)>, x>{};
   }
-  template <char ...chars>
+  template <char ...Chars>
   constexpr auto operator"" Ulic()
   {
-    auto const x = parse_ci<unsigned long, sizeof...(chars)>({chars...});
-    return integral_constant<decltype(x), x>{};
+    constexpr auto x = parse_ci<unsigned long, Chars...>();
+    return integral_constant<remove_const_t<decltype(x)>, x>{};
   }
-  template <char ...chars>
+  template <char ...Chars>
   constexpr auto operator"" lUic()
   {
-    auto const x = parse_ci<unsigned long, sizeof...(chars)>({chars...});
-    return integral_constant<decltype(x), x>{};
+    constexpr auto x = parse_ci<unsigned long, Chars...>();
+    return integral_constant<remove_const_t<decltype(x)>, x>{};
   }
-  template <char ...chars>
+  template <char ...Chars>
   constexpr auto operator"" Luic()
   {
-    auto const x = parse_ci<unsigned long, sizeof...(chars)>({chars...});
-    return integral_constant<decltype(x), x>{};
+    constexpr auto x = parse_ci<unsigned long, Chars...>();
+    return integral_constant<remove_const_t<decltype(x)>, x>{};
   }
-  template <char ...chars>
+  template <char ...Chars>
   constexpr auto operator"" uLic()
   {
-    auto const x = parse_ci<unsigned long, sizeof...(chars)>({chars...});
-    return integral_constant<decltype(x), x>{};
+    constexpr auto x = parse_ci<unsigned long, Chars...>();
+    return integral_constant<remove_const_t<decltype(x)>, x>{};
   }
-  template <char ...chars>
+  template <char ...Chars>
   constexpr auto operator"" ULic()
   {
-    auto const x = parse_ci<unsigned long, sizeof...(chars)>({chars...});
-    return integral_constant<decltype(x), x>{};
+    constexpr auto x = parse_ci<unsigned long, Chars...>();
+    return integral_constant<remove_const_t<decltype(x)>, x>{};
   }
-  template <char ...chars>
+  template <char ...Chars>
   constexpr auto operator"" LUic()
   {
-    auto const x = parse_ci<unsigned long, sizeof...(chars)>({chars...});
-    return integral_constant<decltype(x), x>{};
+    constexpr auto x = parse_ci<unsigned long, Chars...>();
+    return integral_constant<remove_const_t<decltype(x)>, x>{};
   }
 
-  // (signed) long long int
-  template <char ...chars>
+  // (signed) long long
+  template <char ...Chars>
   constexpr auto operator"" llic()
   {
-    auto const x = parse_ci<long long, sizeof...(chars)>({chars...});
-    return integral_constant<decltype(x), x>{};
+    constexpr auto x = parse_ci<long long, Chars...>();
+    return integral_constant<remove_const_t<decltype(x)>, x>{};
   }
-  template <char ...chars>
+  template <char ...Chars>
   constexpr auto operator"" LLic()
   {
-    auto const x = parse_ci<long long, sizeof...(chars)>({chars...});
-    return integral_constant<decltype(x), x>{};
+    constexpr auto x = parse_ci<long long, Chars...>();
+    return integral_constant<remove_const_t<decltype(x)>, x>{};
   }
 
-  // unsigned long long int
-  template <char ...chars>
+  // unsigned long long
+  template <char ...Chars>
   constexpr auto operator"" lluic()
   {
-    auto const x = parse_ci<unsigned long long, sizeof...(chars)>({chars...});
-    return integral_constant<decltype(x), x>{};
+    constexpr auto x = parse_ci<unsigned long long, Chars...>();
+    return integral_constant<remove_const_t<decltype(x)>, x>{};
   }
-  template <char ...chars>
+  template <char ...Chars>
   constexpr auto operator"" ullic()
   {
-    auto const x = parse_ci<unsigned long long, sizeof...(chars)>({chars...});
-    return integral_constant<decltype(x), x>{};
+    constexpr auto x = parse_ci<unsigned long long, Chars...>();
+    return integral_constant<remove_const_t<decltype(x)>, x>{};
   }
-  template <char ...chars>
+  template <char ...Chars>
   constexpr auto operator"" Ullic()
   {
-    auto const x = parse_ci<unsigned long long, sizeof...(chars)>({chars...});
-    return integral_constant<decltype(x), x>{};
+    constexpr auto x = parse_ci<unsigned long long, Chars...>();
+    return integral_constant<remove_const_t<decltype(x)>, x>{};
   }
-  template <char ...chars>
+  template <char ...Chars>
   constexpr auto operator"" llUic()
   {
-    auto const x = parse_ci<unsigned long long, sizeof...(chars)>({chars...});
-    return integral_constant<decltype(x), x>{};
+    constexpr auto x = parse_ci<unsigned long long, Chars...>();
+    return integral_constant<remove_const_t<decltype(x)>, x>{};
   }
-  template <char ...chars>
+  template <char ...Chars>
   constexpr auto operator"" LLuic()
   {
-    auto const x = parse_ci<unsigned long long, sizeof...(chars)>({chars...});
-    return integral_constant<decltype(x), x>{};
+    constexpr auto x = parse_ci<unsigned long long, Chars...>();
+    return integral_constant<remove_const_t<decltype(x)>, x>{};
   }
-  template <char ...chars>
+  template <char ...Chars>
   constexpr auto operator"" uLLic()
   {
-    auto const x = parse_ci<unsigned long long, sizeof...(chars)>({chars...});
-    return integral_constant<decltype(x), x>{};
+    constexpr auto x = parse_ci<unsigned long long, Chars...>();
+    return integral_constant<remove_const_t<decltype(x)>, x>{};
   }
-  template <char ...chars>
+  template <char ...Chars>
   constexpr auto operator"" ULLic()
   {
-    auto const x = parse_ci<unsigned long long, sizeof...(chars)>({chars...});
-    return integral_constant<decltype(x), x>{};
+    constexpr auto x = parse_ci<unsigned long long, Chars...>();
+    return integral_constant<remove_const_t<decltype(x)>, x>{};
   }
-  template <char ...chars>
+  template <char ...Chars>
   constexpr auto operator"" LLUic()
   {
-    auto const x = parse_ci<unsigned long long, sizeof...(chars)>({chars...});
-    return integral_constant<decltype(x), x>{};
+    constexpr auto x = parse_ci<unsigned long long, Chars...>();
+    return integral_constant<remove_const_t<decltype(x)>, x>{};
   }
 
-    // TODO: zic, uzic
+  // ptrdiff_t
+  template <char ...Chars>
+  constexpr auto operator"" zic()
+  {
+    constexpr auto x = parse_ci<ptrdiff_t, Chars...>();
+    return integral_constant<remove_const_t<decltype(x)>, x>{};
+  }
+  template <char ...Chars>
+  constexpr auto operator"" Zic()
+  {
+    constexpr auto x = parse_ci<ptrdiff_t, Chars...>();
+    return integral_constant<remove_const_t<decltype(x)>, x>{};
+  }
+
+  // size_t
+  template <char ...Chars>
+  constexpr auto operator"" zuic()
+  {
+    constexpr auto x = parse_ci<size_t, Chars...>();
+    return integral_constant<remove_const_t<decltype(x)>, x>{};
+  }
+  template <char ...Chars>
+  constexpr auto operator"" uzic()
+  {
+    constexpr auto x = parse_ci<size_t, Chars...>();
+    return integral_constant<remove_const_t<decltype(x)>, x>{};
+  }
+  template <char ...Chars>
+  constexpr auto operator"" Uzic()
+  {
+    constexpr auto x = parse_ci<size_t, Chars...>();
+    return integral_constant<remove_const_t<decltype(x)>, x>{};
+  }
+  template <char ...Chars>
+  constexpr auto operator"" zUic()
+  {
+    constexpr auto x = parse_ci<size_t, Chars...>();
+    return integral_constant<remove_const_t<decltype(x)>, x>{};
+  }
+  template <char ...Chars>
+  constexpr auto operator"" Zuic()
+  {
+    constexpr auto x = parse_ci<size_t, Chars...>();
+    return integral_constant<remove_const_t<decltype(x)>, x>{};
+  }
+  template <char ...Chars>
+  constexpr auto operator"" uZic()
+  {
+    constexpr auto x = parse_ci<size_t, Chars...>();
+    return integral_constant<remove_const_t<decltype(x)>, x>{};
+  }
+  template <char ...Chars>
+  constexpr auto operator"" UZic()
+  {
+    constexpr auto x = parse_ci<size_t, Chars...>();
+    return integral_constant<remove_const_t<decltype(x)>, x>{};
+  }
+  template <char ...Chars>
+  constexpr auto operator"" ZUic()
+  {
+    constexpr auto x = parse_ci<size_t, Chars...>();
+    return integral_constant<remove_const_t<decltype(x)>, x>{};
+  }
 }

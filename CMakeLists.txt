@@ -1,11 +1,11 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.22)
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 project(ic_literals LANGUAGES CXX)
 
 ################################################## 
 # C++ standard version selection
 ################################################## 
-set(CXX_STD 20 CACHE STRING "Set to 14, 17, etc., to enable C++14, C++17, etc.")
+set(CXX_STD 23 CACHE STRING "Set to 14, 17, etc., to enable C++14, C++17, etc.")
 message("-- Using -std=c++${CXX_STD}")
 
 
@@ -35,7 +35,7 @@ include(dependencies)
 
 set(boost_lib)
 if (Boost_INCLUDE_DIR)
-  set(boost_lib boost)
+  set(boost_lib Boost::boost)
 endif()
 
 
